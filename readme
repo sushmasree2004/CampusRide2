@@ -1,0 +1,28 @@
+- The frontend script reads `?token=...` on page load and stores it in `localStorage` as `campusride_token`.
+
+If your backend uses an HttpOnly cookie for auth instead of redirecting with token, adapt the frontend to rely on cookie-authenticated requests (no token needed).
+
+## Socket.io
+
+- The frontend connects to the Socket.io server at `VITE_API_URL` and sends the JWT in `auth: { token }`.
+- Make sure backend's socket.io server verifies `socket.handshake.auth.token` and joins clients to rooms properly.
+
+## Endpoints assumed
+
+- `GET /rides` — list rides
+- `POST /rides` — create ride
+- `GET /rides/:id` — ride details
+- `POST /rides/:id/book` — book seat
+- `POST /rides/:id/cancel` — passenger cancel
+- `DELETE /rides/:id` — driver cancel (not directly used here)
+- `GET /users/me` — profile info including offeredRides and bookings
+- `GET /chat/:rideId` — fetch persisted chat messages
+
+Socket events used:
+- client -> server: `joinRoom` (rideId), `leaveRoom` (rideId), `sendMessage` ({rideId, text})
+- server -> client: `newMessage`, `newRide`, `rideBooked`, `rideCancelled`, `rideExpired`
+
+## Notes
+
+- Adjust `api.js` baseURL if your backend uses a path prefix (e.g., `/api`).
+- If you want a better UI, we can swap CSS for Tailwind or Material UI.
