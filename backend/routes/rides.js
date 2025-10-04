@@ -60,26 +60,26 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// Book a seat
+// replace book handler
 router.post('/:id/book', auth, async (req, res) => {
   try {
-    const ride = await Ride.findById(req.params.id);
-    if (!ride) return res.status(404).json({ msg: 'Ride not found' });
-    if (!ride.isActive) return res.status(400).json({ msg: 'Ride not active' });
-    if (ride.seatsAvailable <= 0) return res.status(400).json({ msg: 'No seats available' });
+    const rideId = req.params.id;
 
-    if (ride.passengers.some(p => p.toString() === req.user._id.toString())) {
-      return res.status(400).json({ msg: 'Already booked' });
-    }
+    const ride = await Ride.findOneAndUpdate(
+      { _id: rideId, seatsAvailable: { $gt: 0 }, isActive: true },
+      { $inc: { seatsAvailable: -1 }, $push: { passengers: req.user._id } },
+      { new: true }
+    );
 
-    ride.passengers.push(req.user._id);
-    ride.seatsAvailable -= 1;
-    await ride.save();
+    if (!ride) return res.status(400).json({ msg: 'No seats available or ride inactive' });
 
     await User.findByIdAndUpdate(req.user._id, { $push: { ridesBooked: ride._id } });
 
-    // emit rideBooked event
-    realtime.emitRideBooked({ rideId: ride._id.toString(), passengerId: req.user._id.toString(), passengerName: req.user.name });
+    realtime.emitRideBooked({
+      rideId: ride._id.toString(),
+      passengerId: req.user._id.toString(),
+      passengerName: req.user.name
+    });
 
     res.json({ msg: 'Booked', ride });
   } catch (err) {
@@ -87,6 +87,7 @@ router.post('/:id/book', auth, async (req, res) => {
     res.status(500).send('Server error');
   }
 });
+
 
 // Passenger cancels booking (POST /rides/:id/cancel)
 router.post('/:id/cancel', auth, async (req, res) => {

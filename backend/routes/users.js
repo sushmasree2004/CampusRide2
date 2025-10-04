@@ -1,18 +1,37 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const User = require('../models/User');
+const User = require("../models/User");
+const authMiddleware = require("../middleware/authMiddleware");
 
-// Get profile with rides
-router.get('/:id', async (req, res) => {
+// @route   GET /users/me
+// @desc    Get current logged-in user profile (from JWT)
+// @access  Private
+router.get("/me", authMiddleware, async (req, res) => {
   try {
-    const u = await User.findById(req.params.id)
-      .populate({ path: 'ridesOffered', populate: { path: 'driver', select: 'name' } })
-      .populate({ path: 'ridesBooked', populate: { path: 'driver', select: 'name' } });
-    if (!u) return res.status(404).json({ msg: 'User not found' });
-    res.json(u);
+    const user = await User.findById(req.user.id).select("-password");
+    if (!user) {
+      return res.status(404).json({ msg: "User not found" });
+    }
+    res.json(user);
   } catch (err) {
-    console.error('Get user error', err);
-    res.status(500).send('Server error');
+    console.error(err.message);
+    res.status(500).send("Server error");
+  }
+});
+
+// @route   GET /users/:id
+// @desc    Get a user profile by ID
+// @access  Public
+router.get("/:id", async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select("-password");
+    if (!user) {
+      return res.status(404).json({ msg: "User not found" });
+    }
+    res.json(user);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server error");
   }
 });
 

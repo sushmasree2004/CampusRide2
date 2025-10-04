@@ -6,3 +6,12 @@ export default function connectSocket(){
   // pass token in auth payload (backend should read socket.handshake.auth.token)
   return io(SOCKET_URL, { auth: { token } })
 }
+
+
+import { io } from 'socket.io-client';
+
+export const connectSocket = (token) => {
+  return io('http://localhost:5000', {
+    auth: { token }
+  });
+};
