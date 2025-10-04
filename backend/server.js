@@ -1,84 +1,100 @@
-require('dotenv').config();
-const http = require('http');
-const app = require('./app');
-const connectDB = require('./config/db');
-const realtime = require('./realtime');
-const Chat = require('./models/Chat');
-const Ride = require('./models/Ride');
-const nodeCron = require('node-cron');
+require("dotenv").config();
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+const mongoose = require("mongoose");
+const cors = require("cors");
+const path = require("path");
 
+// routes
+const rideRoutes = require("./routes/rides");
+const chatRoutes = require("./routes/chat");
+const authRoutes = require("./routes/auth");
+const userRoutes = require("./routes/users");
+
+const Chat = require("./models/Chat");
+
+const app = express();
 const server = http.createServer(app);
-const io = require('socket.io')(server, { cors: { origin: '*' } });
+const io = new Server(server, {
+  cors: {
+    origin: process.env.FRONTEND_URL || "http://localhost:5173",
+    methods: ["GET", "POST"],
+    credentials: true,
+  },
+});
 
-connectDB();
+// basic middleware
+app.use(cors({ origin: process.env.FRONTEND_URL || "http://localhost:5173", credentials: true }));
+app.use(express.json());
 
-// initialize realtime module
-realtime.init(io);
+// attach io to req so routes can emit
+app.use((req, res, next) => {
+  req.io = io;
+  next();
+});
 
-io.on('connection', (socket) => {
-  console.log('Socket connected', socket.id);
+// api routes
+app.use("/api/rides", rideRoutes);
+app.use("/api/chat", chatRoutes);
+app.use("/api/auth", authRoutes);
+app.use("/api/users", userRoutes);
 
-  socket.on('joinRoom', (rideId) => {
-    const room = `ride_${rideId}`;
-    socket.join(room);
-    console.log(`Socket ${socket.id} joined ${room}`);
+// simple health check
+app.get("/api/health", (req, res) => res.json({ ok: true }));
+
+// Socket.IO realtime handlers
+io.on("connection", (socket) => {
+  console.log("Socket connected:", socket.id);
+
+  // join a ride room to receive messages for that ride only
+  socket.on("joinRide", (rideId) => {
+    if (!rideId) return;
+    socket.join(rideId);
+    // optionally emit joined ack
+    socket.emit("joinedRide", { rideId });
   });
 
-  socket.on('leaveRoom', (rideId) => {
-    const room = `ride_${rideId}`;
-    socket.leave(room);
-    console.log(`Socket ${socket.id} left ${room}`);
+  // leave ride room
+  socket.on("leaveRide", (rideId) => {
+    if (!rideId) return;
+    socket.leave(rideId);
   });
 
-  // chat message (persist + broadcast)
-  socket.on('chatMessage', async (payload) => {
-    // payload: { rideId, senderId, message }
+  // send message: save to DB and broadcast to the room
+  socket.on("sendMessage", async ({ rideId, senderId, text, senderName }) => {
     try {
-      const chat = await Chat.create({
-        rideId: payload.rideId,
-        senderId: payload.senderId,
-        message: payload.message,
-        timestamp: payload.timestamp || new Date()
+      if (!rideId || !senderId || !text) return;
+      const newMsg = new Chat({
+        rideId,
+        senderId,
+        senderName: senderName || "Unknown",
+        message: text,
       });
-      realtime.emitNewMessage({
-        _id: chat._id,
-        rideId: chat.rideId.toString(),
-        senderId: chat.senderId.toString(),
-        message: chat.message,
-        timestamp: chat.timestamp
-      });
+      await newMsg.save();
+
+      // emit to everyone in that ride room (including sender)
+      io.to(rideId).emit("receiveMessage", newMsg);
     } catch (err) {
-      console.error('chatMessage error', err);
+      console.error("Socket sendMessage error:", err);
     }
   });
 
-  // optional: clients can emit notifyNewRide, notifyBooking, notifyCancellation
-  socket.on('notifyNewRide', (ride) => realtime.emitNewRide(ride));
-  socket.on('notifyBooking', (payload) => realtime.emitRideBooked(payload));
-  socket.on('notifyCancellation', (payload) => realtime.emitRideCancelled(payload));
-
-  socket.on('disconnect', () => {
-    console.log('Socket disconnected', socket.id);
+  socket.on("disconnect", () => {
+    console.log("Socket disconnected:", socket.id);
   });
 });
 
-// Cleanup job: every 30 minutes
-nodeCron.schedule('*/30 * * * *', async () => {
-  try {
-    const now = new Date();
-    const expiredRides = await Ride.find({ time: { $lt: now }, isActive: true }).select('_id');
-    const ids = expiredRides.map(r => r._id.toString());
-    if (ids.length > 0) {
-      await Ride.updateMany({ _id: { $in: ids } }, { isActive: false });
-      console.log(`[cron] Marked ${ids.length} rides inactive`);
-      realtime.emitRideExpired(ids);
-    } else {
-      // no expired rides
-    }
-  } catch (err) {
-    console.error('[cron] cleanup error', err);
-  }
-});
-
+// Connect to MongoDB and start server
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => console.log(`Server started on ${PORT}`));
+const MONGO = process.env.MONGO_URI;
+
+mongoose
+  .connect(MONGO, { useNewUrlParser: true, useUnifiedTopology: true })
+  .then(() => {
+    console.log("MongoDB connected");
+    server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  })
+  .catch((err) => {
+    console.error("MongoDB connection error:", err);
+  });

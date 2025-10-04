@@ -1,144 +1,107 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const auth = require('../middleware/auth');
-const Ride = require('../models/Ride');
-const User = require('../models/User');
-const realtime = require('../realtime');
+const Ride = require("../models/Ride");
+const auth = require("../middleware/auth"); // ensures req.user exists
 
-// Create ride
-router.post('/', auth, async (req, res) => {
+// Create a new ride
+router.post("/", auth, async (req, res) => {
   try {
-    const { source, destination, time, seatsAvailable } = req.body;
-    const ride = await Ride.create({
-      driver: req.user._id,
-      source, destination,
-      time,
-      seatsAvailable
+    const { from, to, dateTime, seats, price, description } = req.body;
+    const ride = new Ride({
+      driver: req.user.id,
+      from,
+      to,
+      dateTime,
+      seats,
+      price,
+      description,
+      passengers: [],
     });
-    await User.findByIdAndUpdate(req.user._id, { $push: { ridesOffered: ride._id } });
-
-    // emit newRide server-side
-    realtime.emitNewRide(await ride.populate('driver', 'name email').execPopulate?.() || ride);
-    res.json(ride);
+    await ride.save();
+    // emit new ride created (optional)
+    if (req.io) req.io.emit("rideCreated", ride);
+    res.json({ success: true, ride });
   } catch (err) {
-    console.error('Create ride error', err);
-    res.status(500).send('Server error');
+    console.error("Create ride error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
   }
 });
 
-// List rides
-router.get('/', async (req, res) => {
+// Get all rides (simple listing; add filters as needed)
+router.get("/", async (req, res) => {
   try {
-    const { source, destination, fromTime, toTime } = req.query;
-    const q = { isActive: true, time: { $gte: new Date() } };
+    const rides = await Ride.find().populate("driver", "name email").sort({ dateTime: 1 });
+    res.json({ success: true, rides });
+  } catch (err) {
+    console.error("Get rides error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
 
-    if (source) q.source = new RegExp(source, 'i');
-    if (destination) q.destination = new RegExp(destination, 'i');
-    if (fromTime || toTime) {
-      q.time = {};
-      if (fromTime) q.time.$gte = new Date(fromTime);
-      if (toTime) q.time.$lte = new Date(toTime);
+// Book a ride (add current user as passenger)
+router.post("/:rideId/book", auth, async (req, res) => {
+  try {
+    const ride = await Ride.findById(req.params.rideId);
+    if (!ride) return res.status(404).json({ success: false, message: "Ride not found" });
+
+    // prevent double booking
+    if (ride.passengers.some(p => p.toString() === req.user.id)) {
+      return res.json({ success: false, message: "Already booked" });
     }
 
-    const rides = await Ride.find(q).populate('driver', 'name email').sort({ time: 1 }).limit(200);
-    res.json(rides);
-  } catch (err) {
-    console.error('List rides error', err);
-    res.status(500).send('Server error');
-  }
-});
-
-// Get single ride
-router.get('/:id', async (req, res) => {
-  try {
-    const ride = await Ride.findById(req.params.id).populate('driver', 'name email');
-    if (!ride) return res.status(404).json({ msg: 'Ride not found' });
-    res.json(ride);
-  } catch (err) {
-    console.error('Get ride error', err);
-    res.status(500).send('Server error');
-  }
-});
-
-// replace book handler
-router.post('/:id/book', auth, async (req, res) => {
-  try {
-    const rideId = req.params.id;
-
-    const ride = await Ride.findOneAndUpdate(
-      { _id: rideId, seatsAvailable: { $gt: 0 }, isActive: true },
-      { $inc: { seatsAvailable: -1 }, $push: { passengers: req.user._id } },
-      { new: true }
-    );
-
-    if (!ride) return res.status(400).json({ msg: 'No seats available or ride inactive' });
-
-    await User.findByIdAndUpdate(req.user._id, { $push: { ridesBooked: ride._id } });
-
-    realtime.emitRideBooked({
-      rideId: ride._id.toString(),
-      passengerId: req.user._id.toString(),
-      passengerName: req.user.name
-    });
-
-    res.json({ msg: 'Booked', ride });
-  } catch (err) {
-    console.error('Book ride error', err);
-    res.status(500).send('Server error');
-  }
-});
-
-
-// Passenger cancels booking (POST /rides/:id/cancel)
-router.post('/:id/cancel', auth, async (req, res) => {
-  try {
-    const ride = await Ride.findById(req.params.id);
-    if (!ride) return res.status(404).json({ msg: 'Ride not found' });
-
-    const passengerId = req.body.passengerId || req.user._id.toString();
-
-    if (!ride.passengers.some(p => p.toString() === passengerId)) {
-      return res.status(400).json({ msg: 'Passenger not booked in this ride' });
+    // optional seat capacity check
+    if (ride.seats !== undefined && ride.passengers.length >= ride.seats) {
+      return res.json({ success: false, message: "No seats available" });
     }
 
-    ride.passengers = ride.passengers.filter(p => p.toString() !== passengerId);
-    ride.seatsAvailable += 1;
+    ride.passengers.push(req.user.id);
     await ride.save();
 
-    await User.findByIdAndUpdate(passengerId, { $pull: { ridesBooked: ride._id } });
+    // Emit booking update to all clients
+    if (req.io) {
+      req.io.emit("notifyBooking", {
+        rideId: ride._id.toString(),
+        passengers: ride.passengers,
+        seatsLeft: ride.seats !== undefined ? ride.seats - ride.passengers.length : null,
+      });
+    }
 
-    realtime.emitRideCancelled({ rideId: ride._id.toString(), cancelledBy: passengerId, type: 'passenger' });
-
-    res.json({ msg: 'Booking cancelled', ride });
+    res.json({ success: true, ride });
   } catch (err) {
-    console.error('Passenger cancel error', err);
-    res.status(500).send('Server error');
+    console.error("Book ride error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
   }
 });
 
-// Driver cancels full ride (DELETE /rides/:id)
-router.delete('/:id', auth, async (req, res) => {
+// Cancel booking (remove current user from passengers)
+router.post("/:rideId/cancel", auth, async (req, res) => {
   try {
-    const ride = await Ride.findById(req.params.id);
-    if (!ride) return res.status(404).json({ msg: 'Ride not found' });
+    const ride = await Ride.findById(req.params.rideId);
+    if (!ride) return res.status(404).json({ success: false, message: "Ride not found" });
 
-    if (ride.driver.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ msg: 'Only driver can cancel the ride' });
+    const before = ride.passengers.length;
+    ride.passengers = ride.passengers.filter(p => p.toString() !== req.user.id);
+    const after = ride.passengers.length;
+
+    if (before === after) {
+      return res.json({ success: false, message: "You did not have a booking on this ride" });
     }
 
-    ride.isActive = false;
     await ride.save();
 
-    // cleanup references
-    await User.findByIdAndUpdate(ride.driver, { $pull: { ridesOffered: ride._id } });
-    await User.updateMany({ _id: { $in: ride.passengers } }, { $pull: { ridesBooked: ride._id } });
+    // Emit cancellation update to all clients
+    if (req.io) {
+      req.io.emit("notifyCancellation", {
+        rideId: ride._id.toString(),
+        passengers: ride.passengers,
+        seatsLeft: ride.seats !== undefined ? ride.seats - ride.passengers.length : null,
+      });
+    }
 
-    realtime.emitRideCancelled({ rideId: ride._id.toString(), cancelledBy: req.user._id.toString(), type: 'driver' });
-
-    res.json({ msg: 'Ride cancelled', ride });
+    res.json({ success: true, ride });
   } catch (err) {
-    console.error('Driver cancel error', err);
-    res.status(500).send('Server error');
+    console.error("Cancel booking error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
   }
 });
 

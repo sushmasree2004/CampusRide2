@@ -1,55 +1,97 @@
-import React, { useEffect, useState, useRef } from 'react'
-import { io } from 'socket.io-client'
-import api from '../api'
+import React, { useEffect, useState, useContext, useRef } from "react";
+import api from "../src/api";
+import socket from "../src/socket";
+import { AuthContext } from "../src/auth/AuthProvider";
 
-const SOCKET_URL = import.meta.env.VITE_API_URL || 'http://localhost:4000'
+const ChatRoom = ({ rideId }) => {
+  const { user } = useContext(AuthContext);
+  const [messages, setMessages] = useState([]);
+  const [newMsg, setNewMsg] = useState("");
+  const scrollRef = useRef(null);
 
-export default function ChatRoom({rideId}){
-  const [messages, setMessages] = useState([])
-  const [text, setText] = useState('')
-  const socketRef = useRef(null)
+  // Load chat history when component mounts or rideId changes
+  useEffect(() => {
+    if (!rideId) return;
 
-  useEffect(()=> {
-    // load existing messages: backend route GET /chat/:rideId
-    api.get(`/chat/${rideId}`).then(r=> setMessages(r.data)).catch(()=>{})
-    const socket = io(SOCKET_URL, { auth: { token: localStorage.getItem('campusride_token') } })
-    socketRef.current = socket
+    let mounted = true;
+    (async () => {
+      try {
+        const res = await api.get(`/chat/${rideId}`);
+        if (mounted && res.data.success) {
+          setMessages(res.data.messages || []);
+        }
+      } catch (err) {
+        console.error("Failed to fetch messages", err);
+      }
+    })();
 
-    socket.on('connect_error', (err) => {
-      console.warn('Socket error:', err.message)
-    })
-    // join the ride-specific room
-    socket.emit('joinRoom', rideId)
-    socket.on('newMessage', msg => {
-      // msg should match persisted chat message format
-      setMessages(prev => [...prev, msg])
-    })
+    return () => (mounted = false);
+  }, [rideId]);
 
-    return ()=> {
-      socket.emit('leaveRoom', rideId)
-      socket.disconnect()
-    }
-  }, [rideId])
+  // Setup socket: join room + listen for new messages
+  useEffect(() => {
+    if (!rideId) return;
 
-  const send = () => {
-    if(!text) return
-    // sendMessage should include rideId + text; backend should persist and emit newMessage
-    socketRef.current.emit('sendMessage', { rideId, text })
-    setText('')
-  }
+    socket.emit("joinRide", rideId);
+
+    const onReceive = (msg) => {
+      // ensure consistent shape with history
+      setMessages(prev => [...prev, msg]);
+      // (optional) scroll to bottom
+      setTimeout(() => scrollRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }), 50);
+    };
+
+    socket.on("receiveMessage", onReceive);
+
+    return () => {
+      socket.emit("leaveRide", rideId);
+      socket.off("receiveMessage", onReceive);
+    };
+  }, [rideId]);
+
+  const handleSend = (e) => {
+    e.preventDefault();
+    if (!newMsg.trim()) return;
+
+    const payload = {
+      rideId,
+      senderId: user?.id || user?._id,
+      senderName: user?.name || user?.displayName || "Unknown",
+      text: newMsg.trim(),
+    };
+
+    // emit; server saves and broadcasts
+    socket.emit("sendMessage", payload);
+    setNewMsg("");
+  };
 
   return (
-    <div className="chat">
-      <h4>Ride Chat</h4>
-      <div className="messages">
-        {messages.map((m, i) => (
-          <div key={i} className="msg"><strong>{m.senderName || m.sender}:</strong> {m.text}</div>
+    <div className="chat-room" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      <div className="messages" style={{ overflowY: "auto", flex: 1, padding: 8 }}>
+        {messages.map((m) => (
+          <div key={m._id || m.id || Math.random()} style={{ marginBottom: 8 }}>
+            <div style={{ fontSize: 12, color: "#555" }}>
+              <strong>{m.senderName || (m.sender?.name ?? "Unknown")}</strong>{" "}
+              <span style={{ marginLeft: 8, fontSize: 11 }}>{new Date(m.createdAt || m.timestamp || Date.now()).toLocaleTimeString()}</span>
+            </div>
+            <div>{m.message || m.text}</div>
+          </div>
         ))}
+        <div ref={scrollRef} />
       </div>
-      <div className="chat-input">
-        <input value={text} onChange={e=>setText(e.target.value)} placeholder="Message..." />
-        <button className="btn" onClick={send}>Send</button>
-      </div>
+
+      <form onSubmit={handleSend} style={{ display: "flex", padding: 8, borderTop: "1px solid #eee" }}>
+        <input
+          type="text"
+          placeholder="Type a message..."
+          value={newMsg}
+          onChange={(e) => setNewMsg(e.target.value)}
+          style={{ flex: 1, padding: "8px 10px" }}
+        />
+        <button type="submit" style={{ marginLeft: 8 }}>Send</button>
+      </form>
     </div>
-  )
-}
+  );
+};
+
+export default ChatRoom;
